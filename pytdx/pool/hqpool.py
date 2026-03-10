@@ -1,11 +1,13 @@
 # utf-8
 from pytdx.log import DEBUG, log
 from functools import partial
+import threading
 import time
 
 
 ## 调用单个接口，重试次数，超过次数则不再重试
-DEFAULT_API_CALL_MAX_RETRY_TIMES = 20
+## round-robin 模式下 N 连接 × 3 轮足够覆盖瞬态故障
+DEFAULT_API_CALL_MAX_RETRY_TIMES = 6
 ## 重试间隔的休眠时间
 DEFAULT_API_RETRY_INTERVAL = 0.2
 
@@ -14,34 +16,30 @@ class TdxHqApiCallMaxRetryTimesReachedException(Exception):
 
 class TdxHqPool_API(object):
     """
-    实现一个连接池的机制
-    包含：
+    N 连接 round-robin 负载均衡连接池
 
-    1 1个正在进行数据通信的主连接
-    2 1个备选连接，备选连接也连接到服务器，通过心跳包维持连接，当主连接通讯出现问题时，备选连接立刻转化为主连接, 原来的主连接返回ip池，并从ip池中选取新的备选连接
-    3 m个ip构成的ip池，可以通过某个方法获取列表，列表可以进行排序，如果备选连接缺少的时候，我们根据排序的优先级顺序将其追加到备选连接
+    - apis[0..N-1] 为活跃连接，round-robin 轮流分发请求
+    - IP Pool 提供候选 IP 用于故障替换
+    - 向后兼容: pool_size=2 时行为与原来 1 主 1 备一致
     """
 
-    def __init__(self, hq_cls, ippool):
+    def __init__(self, hq_cls, ippool, pool_size=2):
         self.hq_cls = hq_cls
         self.ippool = ippool
-        """
-        正在通信的客户端连接
-        """
-        self.api = hq_cls(multithread=True, heartbeat=True)
-        """
-        备选连接
-        """
-        self.hot_failover_api = hq_cls(multithread=True, heartbeat=True)
+        self.pool_size = pool_size
+
+        # N 个活跃连接
+        self.apis = [hq_cls(multithread=True, heartbeat=True) for _ in range(pool_size)]
+        # round-robin 计数器
+        self._rr_index = 0
+        self._lock = threading.Lock()
 
         self.api_call_max_retry_times = DEFAULT_API_CALL_MAX_RETRY_TIMES
-        self.api_call_retry_times = 0
         self.api_retry_interval = DEFAULT_API_RETRY_INTERVAL
-
 
         # 对hq_cls 里面的get_系列函数进行反射
         log.debug("perform_reflect")
-        self.perform_reflect(self.api)
+        self.perform_reflect(self.apis[0])
 
     def perform_reflect(self, api_obj):
         # ref : https://stackoverflow.com/questions/34439/finding-what-methods-an-object-has
@@ -53,75 +51,83 @@ class TdxHqPool_API(object):
                 _do_hp_api_call = partial(self.do_hq_api_call, method_name)
                 setattr(self, method_name, _do_hp_api_call)
 
+    def _next_api(self):
+        """Round-robin 选取下一个连接"""
+        with self._lock:
+            api = self.apis[self._rr_index % len(self.apis)]
+            self._rr_index += 1
+        return api
+
     def do_hq_api_call(self, method_name, *args, **kwargs):
+        """带 failover 的 round-robin 调用
+
+        - None 结果: 轮转到下一个连接重试（不替换连接）
+        - Exception: 替换失败连接后轮转重试
+        - 最多重试 api_call_max_retry_times 次
         """
-        代理发送请求到实际的客户端
-        :param method_name: 调用的方法名称
-        :param args: 参数
-        :param kwargs: kv参数
-        :return: 调用结果
-        """
-        try:
-            result = getattr(self.api, method_name)(*args, **kwargs)
-            if result is None:
-                log.info("api(%s) call return None" % (method_name,))
-        except Exception as e:
-            log.info("api(%s) call failed, Exception is %s" % (method_name, str(e)))
-            result = None
+        for retry in range(self.api_call_max_retry_times):
+            api = self._next_api()
+            try:
+                result = getattr(api, method_name)(*args, **kwargs)
+                if result is not None:
+                    return result
+                log.info("api(%s) call return None on %s (retry %d)" % (method_name, api.ip, retry))
+            except Exception as e:
+                log.info("api(%s) call failed on %s: %s (retry %d)" % (method_name, api.ip, str(e), retry))
+                # 只在异常时替换连接
+                self._replace_failed_api(api)
 
-        # 如果无法获取信息，则进行重试
-        if result is None:
-            if self.api_call_retry_times >= self.api_call_max_retry_times:
-                log.info("(method_name=%s) max retry times(%d) reached" % (method_name, self.api_call_max_retry_times))
-                raise TdxHqApiCallMaxRetryTimesReachedException("(method_name=%s) max retry times reached" % method_name)
-            old_api_ip = self.api.ip
-            new_api_ip = None
-            if self.hot_failover_api:
-                new_api_ip = self.hot_failover_api.ip
-                log.info("api call from init client (ip=%s) err, perform rotate to (ip =%s)..." %(old_api_ip, new_api_ip))
-                self.api.disconnect()
-                self.api = self.hot_failover_api
-            log.info("retry times is " + str(self.api_call_max_retry_times))
-            # 从池里再次获取备用ip
-            new_ips = self.ippool.get_ips()
-
-            choise_ip = None
-            for _test_ip in new_ips:
-                if _test_ip[0] == old_api_ip or _test_ip[0] == new_api_ip:
-                    continue
-                choise_ip = _test_ip
-                break
-
-            if choise_ip:
-                self.hot_failover_api = self.hq_cls(multithread=True, heartbeat=True)
-                self.hot_failover_api.connect(*choise_ip)
-            else:
-                self.hot_failover_api = None
-            # 阻塞0.2秒，然后递归调用自己
+            # 短暂等待后重试
             time.sleep(self.api_retry_interval)
-            result = self.do_hq_api_call(method_name, *args, **kwargs)
-            self.api_call_retry_times += 1
 
-        else:
-            self.api_call_retry_times = 0
+        raise TdxHqApiCallMaxRetryTimesReachedException(
+            "(method_name=%s) max retry times(%d) reached" % (method_name, self.api_call_max_retry_times))
 
-        return result
+    def _replace_failed_api(self, failed_api):
+        """替换失败的连接"""
+        try:
+            idx = self.apis.index(failed_api)
+        except ValueError:
+            # 已经被替换过了
+            return
 
-    def connect(self, ipandport, hot_failover_ipandport):
-        log.debug("setup ip pool")
+        failed_ip = failed_api.ip
+        failed_api.disconnect()
+
+        # 从 IP 池获取新 IP（排除已在使用的）
+        used_ips = {a.ip for a in self.apis}
+        new_ips = self.ippool.get_ips()
+        for ip_tuple in new_ips:
+            if ip_tuple[0] in used_ips:
+                continue
+            new_api = self.hq_cls(multithread=True, heartbeat=True)
+            try:
+                new_api.connect(*ip_tuple)
+                self.apis[idx] = new_api
+                log.info("replaced failed api %s with %s" % (failed_ip, ip_tuple[0]))
+                return
+            except Exception:
+                new_api.disconnect()
+        log.warning("no available IP to replace failed api %s" % failed_ip)
+
+    def connect(self, *ip_port_pairs):
+        """连接所有活跃连接
+
+        接受 N 个 (ip, port) 元组，N = pool_size
+        向后兼容: 也接受 connect(primary, backup) 的旧调用方式
+        """
         self.ippool.setup()
-        log.debug("connecting to primary api")
-        self.api.connect(*ipandport)
-        log.debug("connecting to hot backup api")
-        self.hot_failover_api.connect(*hot_failover_ipandport)
+        for i, ip_port in enumerate(ip_port_pairs):
+            if i >= len(self.apis):
+                break
+            log.debug("connecting api[%d] to %s" % (i, str(ip_port)))
+            self.apis[i].connect(*ip_port)
         return self
 
     def disconnect(self):
-        log.debug("primary api disconnected")
-        self.api.disconnect()
-        log.debug("hot backup api  disconnected")
-        self.hot_failover_api.disconnect()
-        log.debug("ip pool released")
+        for i, api in enumerate(self.apis):
+            log.debug("disconnecting api[%d]" % i)
+            api.disconnect()
         self.ippool.teardown()
 
     def close(self):
@@ -173,6 +179,3 @@ if __name__ == '__main__':
         ret = api.get_xdxr_info(0, '000001')
         print("send api call done")
         pprint.pprint(ret)
-
-
-

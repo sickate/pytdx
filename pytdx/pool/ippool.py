@@ -90,8 +90,8 @@ class AvailableIPPool(BaseIPPool):
 
     def teardown(self):
         self.stop_event.set()
-        if self.worker_thread.is_alive():
-            self.worker_thread.join()
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=10)
         self.worker_thread = None
 
     def run(self):

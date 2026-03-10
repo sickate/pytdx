@@ -163,8 +163,13 @@ class BaseSocketClient(object):
         :return: 是否连接成功 True/False
         """
 
+        # 先清理旧连接
+        if self.client:
+            self.disconnect()
+
         self.client = TrafficStatSocket(socket.AF_INET, socket.SOCK_STREAM)
         self.client.settimeout(time_out)
+        self.client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         log.debug("connecting to server : %s on port :%d" % (ip, port))
         try:
             self.ip = ip
@@ -196,21 +201,26 @@ class BaseSocketClient(object):
         return self
 
     def disconnect(self):
-
-        if self.heartbeat_thread and \
-                self.heartbeat_thread.is_alive():
+        # 1. 先停心跳线程并等待退出
+        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
             self.stop_event.set()
+            self.heartbeat_thread.join(timeout=3)
+        self.heartbeat_thread = None
+        self.stop_event = None
 
+        # 2. 安全关闭 socket，确保 close() 一定执行
         if self.client:
             log.debug("disconnecting")
             try:
                 self.client.shutdown(socket.SHUT_RDWR)
-                self.client.close()
+            except OSError:
+                pass
+            finally:
+                try:
+                    self.client.close()
+                except OSError:
+                    pass
                 self.client = None
-            except Exception as e:
-                log.debug(str(e))
-                if self.raise_exception:
-                    raise TdxConnectionError("disconnect err")
             log.debug("disconnected")
 
     def close(self):
