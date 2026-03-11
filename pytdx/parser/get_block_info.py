@@ -40,7 +40,7 @@ class GetBlockInfo(BaseParser):
 
 
 
-def get_and_parse_block_info(client, blockfile):
+def get_and_parse_block_info(client, blockfile, result_type=BlockReader_TYPE_FLAT):
     try:
         meta = client.get_block_info_meta(blockfile)
     except Exception as e:
@@ -63,7 +63,7 @@ def get_and_parse_block_info(client, blockfile):
         piece_data = client.get_block_info(blockfile, start, size)
         file_content.extend(piece_data)
 
-    return BlockReader().get_data(file_content, BlockReader_TYPE_FLAT)
+    return BlockReader().get_data(file_content, result_type)
 
 
 if __name__ == '__main__':

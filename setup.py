@@ -72,6 +72,7 @@ setup(
             'hqreader=pytdx.bin.hqreader:main',
             'get_tts=pytdx.bin.get_tdx_trader_server:main',
             'hqbenchmark=pytdx.bin.hqbenchmark:main',
+            'hqsample=pytdx.bin.hqsample:main',
         ]
     },
     **cythonkw

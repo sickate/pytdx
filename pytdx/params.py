@@ -7,6 +7,7 @@ class TDXParams:
 
     MARKET_SZ = 0  # 深圳
     MARKET_SH = 1  # 上海
+    MARKET_BJ = 2  # 北京（北交所）
 
     #K线种类
     # K 线种类
@@ -43,6 +44,23 @@ class TDXParams:
     # k先数据最多800条
     MAX_KLINE_COUNT = 800
 
+
+    # 期货市场代码 (扩展行情)
+    MARKET_EX_CZCE = 28     # 郑商所 (郑州商品)
+    MARKET_EX_DCE = 29      # 大商所 (大连商品)
+    MARKET_EX_SHFE = 30     # 上期所 (上海期货)
+    MARKET_EX_CFFEX = 47    # 中金所 (股指期货)
+
+    # 扩展行情指数市场
+    MARKET_EX_HK_INDEX = 27    # 香港指数
+    MARKET_EX_GLOBAL_INDEX = 37  # 全球指数
+    MARKET_EX_ZZ_INDEX = 62    # 中证指数
+    MARKET_EX_GZ_INDEX = 102   # 国证指数
+
+    # 扩展行情品类 (用于 get_instrument_quote_list)
+    EX_CATEGORY_HK = 2        # 港股
+    EX_CATEGORY_FUTURES = 3    # 期货
+    EX_CATEGORY_INDEX = 5      # 指数
 
     # 板块相关参数
     BLOCK_SZ = "block_zs.dat"

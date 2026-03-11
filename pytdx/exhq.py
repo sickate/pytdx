@@ -124,6 +124,67 @@ class TdxExHq_API(BaseSocketClient):
         cmd.setParams(market, category, start, count)
         return cmd.call_api()
 
+    def get_future_contracts(self, market):
+        """获取指定期货交易所的全部合约信息
+
+        遍历 get_instrument_info 按 market 过滤
+
+        :param market: 期货市场代码 (如 TDXParams.MARKET_EX_CZCE=28, MARKET_EX_DCE=29 等)
+        :return: 该交易所全部合约信息列表
+        """
+        result = []
+        start = 0
+        count = 100
+        while True:
+            data = self.get_instrument_info(start, count)
+            if data is None or len(data) == 0:
+                break
+            for item in data:
+                if item.get('market') == market:
+                    result.append(item)
+            start += count
+            if len(data) < count:
+                break
+        return result
+
+    def get_future_quote_list(self, market, start=0, count=80):
+        """获取期货市场行情列表
+
+        封装 get_instrument_quote_list，自动使用期货品类(3)
+
+        :param market: 期货市场代码
+        :param start: 起始位置
+        :param count: 获取数量
+        :return: 行情列表
+        """
+        return self.get_instrument_quote_list(market, TDXParams.EX_CATEGORY_FUTURES, start, count)
+
+    def get_future_bars(self, market, code, category=TDXParams.KLINE_TYPE_DAILY, start=0, count=700):
+        """获取期货K线数据
+
+        封装 get_instrument_bars，market 参数在前更直观
+
+        :param market: 期货市场代码
+        :param code: 合约代码
+        :param category: K线类型，默认日K
+        :param start: 起始位置
+        :param count: 获取数量
+        :return: K线数据列表
+        """
+        return self.get_instrument_bars(category, market, code, start, count)
+
+    def get_ex_index_bars(self, market, code, category=TDXParams.KLINE_TYPE_DAILY, start=0, count=700):
+        """获取扩展行情指数K线数据（中证指数、国证指数等）
+
+        :param market: 指数市场代码 (如 TDXParams.MARKET_EX_ZZ_INDEX=62, MARKET_EX_GZ_INDEX=102)
+        :param code: 指数代码
+        :param category: K线类型，默认日K
+        :param start: 起始位置
+        :param count: 获取数量
+        :return: K线数据列表
+        """
+        return self.get_instrument_bars(category, market, code, start, count)
+
     def do_heartbeat(self):
         self.get_instrument_count()
 

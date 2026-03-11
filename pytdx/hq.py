@@ -19,6 +19,7 @@ from pytdx.log import DEBUG, log
 from pytdx.params import TDXParams
 from pytdx.parser.get_block_info import (GetBlockInfo, GetBlockInfoMeta,
                                          get_and_parse_block_info)
+from pytdx.reader.block_reader import BlockReader_TYPE_GROUP
 from pytdx.parser.get_company_info_category import GetCompanyInfoCategory
 from pytdx.parser.get_company_info_content import GetCompanyInfoContent
 from pytdx.parser.get_finance_info import GetFinanceInfo
@@ -163,7 +164,9 @@ class TdxHq_API(BaseSocketClient):
         cmd.setParams(blockfile, start, size)
         return cmd.call_api()
 
-    def get_and_parse_block_info(self, blockfile):
+    def get_and_parse_block_info(self, blockfile, result_type=None):
+        if result_type is not None:
+            return get_and_parse_block_info(self, blockfile, result_type)
         return get_and_parse_block_info(self, blockfile)
 
     @update_last_ack_time
@@ -198,6 +201,72 @@ class TdxHq_API(BaseSocketClient):
                     break
 
         return filecontent
+
+    def get_block_sector_list(self, blockfile):
+        """获取指定板块文件的板块列表（按板块分组）
+
+        :param blockfile: 板块文件名 (如 TDXParams.BLOCK_GN, BLOCK_FG, BLOCK_SZ 等)
+        :return: 板块列表，每项含 blockname, block_type, stock_count, code_list
+        """
+        return get_and_parse_block_info(self, blockfile, BlockReader_TYPE_GROUP)
+
+    def get_concept_sector_list(self):
+        """获取概念板块列表
+
+        解析 block_gn.dat，返回按板块分组的概念板块列表
+
+        :return: 概念板块列表，每项含 blockname, block_type, stock_count, code_list
+        """
+        return self.get_block_sector_list(TDXParams.BLOCK_GN)
+
+    def get_concept_sector_stocks(self, sector_name):
+        """获取指定概念板块的成分股代码列表
+
+        :param sector_name: 概念板块名称
+        :return: 成分股代码列表
+        """
+        sectors = self.get_concept_sector_list()
+        if sectors is None:
+            return []
+        for sector in sectors:
+            if sector['blockname'] == sector_name:
+                code_list = sector.get('code_list', '')
+                if code_list:
+                    return code_list.split(',')
+                return []
+        return []
+
+    def get_index_list(self, market=None):
+        """获取指数列表
+
+        从 block_zs.dat 获取指数列表，可按市场过滤
+
+        :param market: 可选，市场代码过滤 (TDXParams.MARKET_SZ=0 或 MARKET_SH=1)
+        :return: 指数列表
+        """
+        data = get_and_parse_block_info(self, TDXParams.BLOCK_SZ)
+        if data is None:
+            return []
+        if market is not None:
+            result = []
+            for item in data:
+                code = item.get('code', '')
+                if market == TDXParams.MARKET_SH and code.startswith(('000', '880')):
+                    result.append(item)
+                elif market == TDXParams.MARKET_SZ and code.startswith(('399',)):
+                    result.append(item)
+            return result
+        return data
+
+    def get_index_quotes(self, index_list):
+        """批量获取指数实时行情
+
+        封装 get_security_quotes，接受 [(market, code), ...] 格式的指数列表
+
+        :param index_list: 指数列表，格式为 [(market, code), ...] 或 (market, code)
+        :return: 指数行情列表
+        """
+        return self.get_security_quotes(index_list)
 
     def do_heartbeat(self):
         self.get_security_count(random.randint(0, 1))
